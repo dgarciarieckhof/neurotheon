@@ -1,62 +1,91 @@
 """
-Reload newest weights from runs/ every 30s and play an episode
-so you can *see* learning progress while `train.py` is running.
+live_monitor.py
+───────────────
+Reload newest checkpoint from runs/ every 30 s and show an episode.
 """
-import glob, os, time, pygame
+
+from __future__ import annotations
+import glob, os, time, pygame, numpy as np
 from envs.turret_env import TurretEnv
 from stable_baselines3 import PPO
-from sim.pygame_visual import draw, CELL, MARGIN, COL         # reuse routines
+from sim.pygame_visual import draw, CELL, MARGIN, COL  # reuse drawing helper
 
-CHECK_EVERY = 30      # seconds
+CHECK_EVERY = 20  # seconds
 
-def newest_checkpoint():
-    files = glob.glob("runs/ppo_turret_step-*.zip")
+# --- checkpoint utils --------------------------------------------------
+def newest_ckpt() -> str | None:
+    files = glob.glob("runs/ppo_turret_step_*_steps.zip")
     return max(files, key=os.path.getmtime) if files else None
 
+# --- main loop ---------------------------------------------------------
 def main():
     pygame.init()
     env = TurretEnv()
-    win = pygame.display.set_mode((env.gs*CELL, env.gs*CELL))
-    font = pygame.font.SysFont(None, 20); clock = pygame.time.Clock()
+    win = pygame.display.set_mode((env.gs * CELL, env.gs * CELL))
+    font = pygame.font.SysFont(None, 20)
+    clock = pygame.time.Clock()
 
-    weights = newest_checkpoint()
-    if not weights:
+    # wait for first checkpoint
+    ckpt = newest_ckpt()
+    while ckpt is None:
         print("Waiting for first checkpoint…")
-        while not weights:
-            time.sleep(CHECK_EVERY)
-            weights = newest_checkpoint()
+        time.sleep(CHECK_EVERY)
+        ckpt = newest_ckpt()
 
-    model = PPO.load(weights, env=env, device="cpu")
-    obs,_ = env.reset(); env.observation = obs
-    explosion_pos=None; ttl=0; step=0; score=0
+    print("🔄  Loading", ckpt)
+    model = PPO.load(ckpt, env=env, device="cpu")
 
-    t_last = time.time()
-    running=True
+    obs, _ = env.reset()
+    env.observation = obs
+    expl_pos, ttl, step, score = None, 0, 0, 0.0
+    last_check = time.time()
+
+    running = True
     while running:
-        # reload weights periodically
-        if time.time()-t_last > CHECK_EVERY:
-            latest = newest_checkpoint()
-            if latest and latest != weights:
+        # hot-reload weights
+        if time.time() - last_check > CHECK_EVERY:
+            latest = newest_ckpt()
+            if latest and latest != ckpt:
                 print("🔄  Reloading", latest)
                 model = PPO.load(latest, env=env, device="cpu")
-                weights = latest
-            t_last = time.time()
+                ckpt = latest
+            last_check = time.time()
 
         for e in pygame.event.get():
-            if e.type==pygame.QUIT: running=False
-        action,_ = model.predict(obs, deterministic=True)
-        obs,r,done,_,info = env.step(action)
+            if e.type == pygame.QUIT:
+                running = False
+
+        # SB3 returns array shape (n_envs,) – squeeze to scalar
+        action, _ = model.predict(obs, deterministic=True)
+        if isinstance(action, np.ndarray):
+            action = int(action.item())   # works for shape () or (1,)
+        else:
+            action = int(action)
+
+        obs, r, done, _, info = env.step(action)
         env.observation = obs
-        score+=r; step+=1
+        score += r
+        step += 1
+
         if info.get("explosion") is not None:
-            explosion_pos=info["explosion"]; ttl=1
-        elif ttl: ttl-=1
-        else: explosion_pos=None
+            expl_pos, ttl = info["explosion"], 1
+        elif ttl:
+            ttl -= 1
+        else:
+            expl_pos = None
+
         if done:
-            obs,_=env.reset(); env.observation=obs; step=score=0
-        draw(env, win, font, clock.get_fps(), step, score,
-             explosion_pos, ttl)
+            print(f"Episode finished | reward {score:.2f}")
+            obs, _ = env.reset()
+            env.observation = obs
+            step = score = ttl = 0
+            expl_pos = None
+
+        draw(env, win, font, clock.get_fps(), step, score, expl_pos, ttl)
         clock.tick(20)
+
     pygame.quit()
 
-if __name__=="__main__": main()
+# ----------------------------------------------------------------------
+if __name__ == "__main__":
+    main()
