@@ -84,9 +84,12 @@ def main() -> None:
         if time.time() - last_check > CHECK_EVERY:
             latest = newest_ckpt()
             if latest and latest != ckpt:
-                print("🔄  Reloading", latest)
-                model = PPO.load(latest, env=env, device="cpu")
-                ckpt = latest
+                try:
+                    print("🔄  Reloading", latest)
+                    model = PPO.load(latest, env=env, device="cpu")
+                    ckpt = latest
+                except Exception as e:
+                    print(f"⚠️  Failed to load {latest} — {e}")
 
             new_hash = md5(VEC_PATH)
             if new_hash and new_hash != vec_hash:

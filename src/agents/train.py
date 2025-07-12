@@ -38,15 +38,50 @@ def main():
     curric_cb = AdaptiveCurriculum(
         make_env,
         milestones=[
-            (0,        dict(n_enemies=3, enemy_move_every=8)),
-            (50_000,   dict(n_enemies=5, enemy_move_every=6)),
-            (100_000,  dict(n_enemies=7, enemy_move_every=5,
-                            path_probs=(0.4, 0.35, 0.25))),
-            (200_000,  dict(cooldown_steps=2, sensor_min=2)),
+            # Phase 1 – Basic aim + low threat
+            (0, dict(
+                n_enemies=3,
+                enemy_move_every=8,
+                path_probs=(1.0, 0.0, 0.0),  # straight only
+                cooldown_steps=0,
+                sensor_min=5,
+            )),
+
+            # Phase 2 – More targets, some movement variety
+            (50_000, dict(
+                n_enemies=5,
+                enemy_move_every=6,
+                path_probs=(0.7, 0.2, 0.1),  # mostly straight, few zigzag
+            )),
+
+            # Phase 3 – Full mixed pathing, tighter timing
+            (100_000, dict(
+                n_enemies=7,
+                enemy_move_every=5,
+                path_probs=(0.4, 0.35, 0.25),  # introduce erratic patterns
+                sensor_min=3,
+            )),
+
+            # Phase 4 – Fire cooldown and reduced visibility
+            (175_000, dict(
+                n_enemies=9,
+                enemy_move_every=4,
+                cooldown_steps=1,
+                sensor_min=2,
+            )),
+
+            # Phase 5 – Final test: tight, reactive combat
+            (250_000, dict(
+                n_enemies=11,
+                enemy_move_every=3,
+                cooldown_steps=2,
+                sensor_min=1,
+                path_probs=(0.33, 0.33, 0.34),  # full pathing entropy
+            )),
         ],
         verbose=1,
     )
-    vec_cb    = SaveVecNormCallback(venv, "runs/vecnorm.pkl", save_freq_calls)
+    vec_cb = SaveVecNormCallback(venv, "runs/vecnorm.pkl", save_freq_calls)
 
     model = PPO(
         "MlpPolicy",
