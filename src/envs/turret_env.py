@@ -26,7 +26,7 @@ class TurretEnv(gym.Env):
     # ────────────────────────────────────────────────────────────────
     def __init__(
         self,
-        grid_size: int = 21,
+        grid_size: int = 31,
         max_steps: int = 300,
         sensor_range: int = 6,        # initial range
         sensor_min: int = 3,          # min range when fog is thick

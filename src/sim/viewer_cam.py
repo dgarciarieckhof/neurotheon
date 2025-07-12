@@ -15,7 +15,7 @@ def main(weights="runs/ppo_turret_final.zip"):
     model = PPO.load(weights, device="cpu")
 
     win = pygame.display.set_mode((env.gs * CELL, env.gs * CELL))
-    font = pygame.font.SysFont(None, 20)
+    font = pygame.font.SysFont(None, 32)
     clock = pygame.time.Clock()
 
     obs, _ = env.reset()

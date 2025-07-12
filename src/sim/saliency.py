@@ -23,9 +23,9 @@ def grad_cam(model, obs: np.ndarray, device: str = "cpu") -> np.ndarray:
     grad, = torch.autograd.grad(
         logits[0, act_id], inp,
         retain_graph=False, create_graph=False
-    )  # grad shape: (1, 21, 21, 3)
+    )  
 
-    cam = grad.abs().detach().cpu().numpy()[0].sum(axis=2)  # 21×21
+    cam = grad.abs().detach().cpu().numpy()[0].sum(axis=2)
 
     # Normalize 0-1 (avoid /0)
     cam -= cam.min()

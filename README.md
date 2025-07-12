@@ -40,16 +40,16 @@ engagement are introduced. Neurotheon explores whether:
 uv sync            # uses pyproject.toml
 
 # 2. manual smoke-test
-python -m sim.pygame_visual          # WASD / arrow keys to fire
+uv run python -m sim.pygame_visual          # WASD / arrow keys to fire
 
 # 3. start training (uses GPU if available)
-python -m agents.train               # checkpoints drop in ./runs/
+uv run python -m agents.train               # checkpoints drop in ./runs/
 
 # 4. watch learning progress in a second terminal
-python -m sim.live_monitor           # TAB = Grad-CAM overlay
+uv run python -m sim.live_monitor           # TAB = Grad-CAM overlay
 
 # 5. keep track of training metrics in a third terminal
-tensorboard --logdir logs --port 6006           
+uv run tensorboard --logdir logs      
 ```
 > **Note**: On head-less servers without audio hardware, the Pygame mixer falls back to silent mode automatically, so viewers still run over SSH-X11 or VS Code tunnels.
 
