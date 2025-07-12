@@ -5,66 +5,82 @@ Checkpoints every 10k steps are written to runs/.
 
 from envs.turret_env import TurretEnv
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
-from agents.curriculum import CurriculumCallback
-from agents.callback_kills import KillCountCallback
+from agents.curriculum import AdaptiveCurriculum
 from agents.callback_vecnorm import SaveVecNormCallback
+from agents.callback_kills import KillCountCallback
+from agents.callback_stats import StatsCallback
+from agents.callback_csv import EpisodeCSVCallback
 
-TOTAL_STEPS = 200_000
+
+TOTAL_STEPS = 300_000
 CKPT_FREQ   = 10_000
+WORKERS     = 4
+save_freq_calls = CKPT_FREQ // WORKERS
 
-
-# ── env factory ──────────────────────────────────────────────────
 def make_env(**kw):
     return TurretEnv(**kw)
 
+def build_venv():
+    # each worker gets its own seed
+    def _factory(idx: int):
+        return lambda: make_env(n_enemies=3, enemy_move_every=8, seed=idx)
 
-# ── build VecNormalize env (rewards only) ────────────────────────
-base_vec = DummyVecEnv([lambda: make_env(n_enemies=2, enemy_move_every=10)])
-venv     = VecNormalize(base_vec, norm_obs=False,
-                        norm_reward=True, clip_reward=10.0)
+    base = SubprocVecEnv([_factory(i) for i in range(WORKERS)])
+    return VecNormalize(base, norm_obs=False, norm_reward=True, clip_reward=10.0)
 
-# ── callbacks ────────────────────────────────────────────────────
-ckpt_cb = CheckpointCallback(
-    save_freq=CKPT_FREQ,
-    save_path="runs",
-    name_prefix="ppo_turret_step"
-)
 
-curric_cb = CurriculumCallback(
-    make_env,
-    milestones=[
-        (0,       dict(n_enemies=2, enemy_move_every=10)),
-        (50_000,  dict(n_enemies=4, enemy_move_every=8)),
-        (100_000, dict(n_enemies=6, enemy_move_every=6)),
-        (150_000, dict(n_enemies=8, enemy_move_every=4)),
-    ],
-    verbose=1,
-)
+def main():
+    venv = build_venv()
 
-vec_cb = SaveVecNormCallback(venv, "runs/vecnorm.pkl", CKPT_FREQ)
+    ckpt_cb   = CheckpointCallback(save_freq_calls, "runs", "ppo_turret_step")
+    curric_cb = AdaptiveCurriculum(
+        make_env,
+        milestones=[
+            (0,        dict(n_enemies=3, enemy_move_every=8)),
+            (50_000,   dict(n_enemies=5, enemy_move_every=6)),
+            (100_000,  dict(n_enemies=7, enemy_move_every=5,
+                            path_probs=(0.4, 0.35, 0.25))),
+            (200_000,  dict(cooldown_steps=2, sensor_min=2)),
+        ],
+        verbose=1,
+    )
+    vec_cb    = SaveVecNormCallback(venv, "runs/vecnorm.pkl", save_freq_calls)
 
-print("✔ Using PyTorch device: auto (GPU if available)")
+    model = PPO(
+        "MlpPolicy",
+        venv,
+        n_steps=1024,
+        batch_size=4096,
+        learning_rate=1e-4,
+        tensorboard_log="logs",
+        verbose=1,
+        device="auto",
+        policy_kwargs=dict(net_arch=[256, 256]),
+    )
 
-model = PPO(
-    "MlpPolicy",             # 21×21×3 → MLP is fine
-    venv,
-    learning_rate=3e-4,
-    batch_size=1024,
-    tensorboard_log="logs",
-    verbose=1,
-    device="auto",
-    policy_kwargs=dict(net_arch=[256, 256]),
-)
+    model.learn(
+        total_timesteps=TOTAL_STEPS,
+        callback=[ckpt_cb, curric_cb,
+                  KillCountCallback(),
+                  StatsCallback(),
+                  EpisodeCSVCallback(),
+                  vec_cb]
+    )
 
-model.learn(
-    total_timesteps=TOTAL_STEPS,
-    callback=[ckpt_cb, curric_cb, KillCountCallback(), vec_cb]
-)
+    model.save("runs/ppo_turret_final")
+    venv.save("runs/vecnorm.pkl")
+    print("✓ Training finished – weights + vecnorm saved in runs/")
 
-# save both weights and VecNormalize statistics
-model.save("runs/ppo_turret_final")
-venv.save("runs/vecnorm.pkl")
 
-print("✓ Training finished – weights + vecnorm saved in runs/")
+# ————————————————————————————————————————————
+if __name__ == "__main__":
+    from multiprocessing import set_start_method, freeze_support
+    freeze_support()                     # Windows-safe; no-op on Unix
+    try:
+        # On POSIX "fork" is fastest; fallback to default if already set
+        set_start_method("fork")
+    except RuntimeError:
+        pass
+    main()

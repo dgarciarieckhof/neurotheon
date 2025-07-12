@@ -41,7 +41,7 @@ def draw(env, surf, font, fps, step, rew, expl_pos, ttl, kills):  # NEW kills ar
                          pygame.Rect(ey * CELL + MARGIN, ex * CELL + MARGIN,
                                      CELL - 2 * MARGIN, CELL - 2 * MARGIN))
 
-    hud = font.render(f"FPS {fps:.1f}  step {step}  reward {rew:.2f}  kills {kills}",
+    hud = font.render(f"FPS {fps:.1f}  step {step}  reward {rew:.2f}  enemies killed {kills}",
                       True, (255, 255, 255))                        # NEW text
     surf.blit(hud, (5, 5))
     pygame.display.flip()
