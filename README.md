@@ -17,10 +17,9 @@ Modern friend-or-foe (FoF) logic based on static rules breaks down
 whenever stealth profiles, sensor clutter, or rapidly changing rules of
 engagement are introduced. Neurotheon explores whether:
 
-1. Reinforcement-learning + safety gating can keep fratricide near
-zero,
+1. Reinforcement-learning + safety gating can keep fratricide near zero.
 
-2. Learned behaviour adapts online to adversary counter-measures,
+2. Learned behaviour adapts online to adversary counter-measures.
 
 3. The network’s reasoning can be surfaced through saliency maps for operator trust.
 
