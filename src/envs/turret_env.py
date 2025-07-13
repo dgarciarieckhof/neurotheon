@@ -173,6 +173,45 @@ class TurretEnv(gym.Env):
         obs[ax, ay, 2] = 1
         return obs
 
+    def _calculate_threat_level(self) -> float:
+        """Calculate current threat level based on enemy positions and movement"""
+        threat = 0.0
+        
+        for e in self.entities:
+            if e["type"] == "enemy":
+                distance = np.linalg.norm(e["pos"] - self.agent_pos)
+                max_distance = np.sqrt(2) * self.gs  # Maximum possible distance
+                
+                # Higher threat for closer enemies (exponential decay)
+                proximity_threat = np.exp(-distance / 5.0)
+                
+                # Additional threat based on movement pattern
+                if e["mode"] == "direct":
+                    movement_multiplier = 1.5  # Direct movement is most threatening
+                elif e["mode"] == "zigzag":
+                    movement_multiplier = 1.2  # Zigzag is moderately threatening
+                else:  # spiral
+                    movement_multiplier = 1.0  # Spiral is least predictable but slower
+                
+                threat += proximity_threat * movement_multiplier
+        
+        return threat
+
+    def _calculate_engagement_reward(self) -> float:
+        """Reward for engaging with the environment based on threat level"""
+        threat = self._calculate_threat_level()
+        
+        # Base engagement reward scales with threat
+        base_reward = 0.01 * threat
+        
+        # Bonus for high-threat situations
+        if threat > 2.0:
+            base_reward += 0.05
+        elif threat > 1.0:
+            base_reward += 0.02
+        
+        return base_reward
+
     def _move(self):
         if self.steps % self.enemy_move_every == 0:
             for e in self.entities:
@@ -230,49 +269,183 @@ class TurretEnv(gym.Env):
         self.last_shot_step = -self.cooldown_steps
         self.turret_hits = 0
         self.ally_hit_count = 0
+        self.consecutive_idle_steps = 0
+        self.last_enemy_count = len([e for e in self.entities if e["type"] == "enemy"])
         return self._get_obs(), {}
 
     def step(self, action: int):
-        info = {"hit": None, "explosion": None, "turret_destroyed": False}
-        reward, done = 0.0, False
+        info = {"hit": None, "explosion": [], "turret_destroyed": False}
+        reward = 0.0
+        done = False
 
+        # Track consecutive idle actions
+        if action == 0:
+            self.consecutive_idle_steps += 1
+        else:
+            self.consecutive_idle_steps = 0
+
+        # AGGRESSIVE IDLE PENALTY - scales with threat and consecutive idle actions
+        if action == 0:
+            threat_level = self._calculate_threat_level()
+            
+            # Base idle penalty
+            idle_penalty = 0.05
+            
+            # Penalty scales with threat level
+            threat_penalty = 0.02 * threat_level
+            
+            # Escalating penalty for consecutive idle actions
+            consecutive_penalty = 0.01 * (self.consecutive_idle_steps ** 1.5)
+            
+            # Time pressure penalty (enemies get closer over time)
+            time_pressure = 0.001 * (self.steps / self.max_steps)
+            
+            total_idle_penalty = idle_penalty + threat_penalty + consecutive_penalty + time_pressure
+            reward -= total_idle_penalty
+            
+            # Add small engagement reward for strategic waiting in low-threat situations
+            if threat_level < 0.5:
+                reward += 0.005  # Very small reward for strategic patience
+        
+        # SHOOTING MECHANICS
         can_fire = (self.steps - self.last_shot_step) >= self.cooldown_steps
+        
         if action != 0 and can_fire:
             self.last_shot_step = self.steps
             pos = self.agent_pos.copy()
+            
+            # Small reward for taking action (being aggressive)
+            reward += 0.01
+            
+            # Track all hits in this shot
+            hits = []
+            
+            # Trace the shot path - PENETRATING SHOT
             while True:
                 pos = pos + self.vec[action]
                 x, y = pos
+                
+                # Check bounds
                 if not (0 <= x < self.gs and 0 <= y < self.gs):
                     break
-                idx = next((i for i, e in enumerate(self.entities)
-                            if np.array_equal(e["pos"], pos)), None)
-                if idx is not None:
-                    e = self.entities.pop(idx)
-                    info["explosion"] = pos.copy()
-                    if e["type"] == "enemy":
-                        reward += 2.0 + 0.01 * (self.max_steps - self.steps)
-                        info["hit"] = "enemy"
-                    elif e["type"] == "ally":
-                        self.ally_hit_count += 1
-                        penalty = 1.0 + 0.2 * self.ally_hit_count
-                        reward -= penalty
-                        info["hit"] = "ally"
-                    else:
-                        reward -= 0.3
-                        info["hit"] = "neutral"
-                    break
+                
+                # Check for hit at this position
+                hit_entities = [i for i, e in enumerate(self.entities)
+                               if np.array_equal(e["pos"], pos)]
+                
+                if hit_entities:
+                    # Process all entities at this position
+                    for idx in sorted(hit_entities, reverse=True):  # Remove from end to avoid index shifts
+                        e = self.entities.pop(idx)
+                        hits.append(e)
+                        # Add explosion for each hit entity
+                        info["explosion"].append({
+                            "pos": pos.copy(),
+                            "type": e["type"]
+                        })
+            
+            # Process all hits and calculate rewards
+            total_shot_reward = 0.0
+            enemy_kills = 0
+            ally_kills = 0
+            neutral_kills = 0
+            
+            for i, e in enumerate(hits):
+                if e["type"] == "enemy":
+                    enemy_kills += 1
+                    
+                    # Base reward for enemy kill
+                    base_enemy_reward = 5.0
+                    
+                    # Distance bonus (closer enemies are more dangerous)
+                    distance = np.linalg.norm(e["pos"] - self.agent_pos)
+                    distance_bonus = max(0, 2.0 - distance * 0.2)
+                    
+                    # Time bonus (faster kills are better)
+                    time_bonus = 0.02 * (self.max_steps - self.steps)
+                    
+                    # Threat level bonus
+                    threat_bonus = 0.5 * self._calculate_threat_level()
+                    
+                    # Movement pattern bonus
+                    if e["mode"] == "direct":
+                        pattern_bonus = 1.0  # Most dangerous
+                    elif e["mode"] == "zigzag":
+                        pattern_bonus = 0.8  # Moderately dangerous
+                    else:  # spiral
+                        pattern_bonus = 0.6  # Least predictable
+                    
+                    # Multi-kill bonus (reward for efficiency)
+                    multi_kill_bonus = 0.5 * (enemy_kills - 1)  # Bonus for 2nd, 3rd, etc. enemy in same shot
+                    
+                    total_enemy_reward = base_enemy_reward + distance_bonus + time_bonus + threat_bonus + pattern_bonus + multi_kill_bonus
+                    total_shot_reward += total_enemy_reward
+                    
+                elif e["type"] == "ally":
+                    ally_kills += 1
+                    self.ally_hit_count += 1
+                    
+                    # Base penalty
+                    base_ally_penalty = 8.0
+                    
+                    # Escalating penalty for multiple ally kills
+                    escalation_penalty = 3.0 * (self.ally_hit_count ** 2)
+                    
+                    # Progress penalty (hitting allies later in the game is worse)
+                    progress_penalty = 2.0 * (self.steps / self.max_steps)
+                    
+                    # Multi-ally kill penalty (very bad to hit multiple allies in one shot)
+                    multi_ally_penalty = 5.0 * (ally_kills - 1)
+                    
+                    total_ally_penalty = base_ally_penalty + escalation_penalty + progress_penalty + multi_ally_penalty
+                    total_shot_reward -= total_ally_penalty
+                    
+                else:  # neutral
+                    neutral_kills += 1
+                    
+                    # Base penalty
+                    base_neutral_penalty = 2.0
+                    
+                    # Small escalation for multiple neutral kills
+                    neutral_count = sum(1 for e in self.entities if e["type"] == "neutral")
+                    escalation = 0.5 * (self.cfg["n_neutrals"] - neutral_count)
+                    
+                    # Multi-neutral kill penalty
+                    multi_neutral_penalty = 1.0 * (neutral_kills - 1)
+                    
+                    total_neutral_penalty = base_neutral_penalty + escalation + multi_neutral_penalty
+                    total_shot_reward -= total_neutral_penalty
+            
+            # Apply the total shot reward
+            reward += total_shot_reward
+            
+            # Set info based on what was hit
+            if hits:
+                if enemy_kills > 0:
+                    info["hit"] = f"enemy_x{enemy_kills}" if enemy_kills > 1 else "enemy"
+                elif ally_kills > 0:
+                    info["hit"] = f"ally_x{ally_kills}" if ally_kills > 1 else "ally"
+                    # Consider ending episode early if too many allies killed in total
+                    if self.ally_hit_count >= 2:
+                        reward -= 10.0  # Severe penalty
+                        done = True
+                        info["turret_destroyed"] = True
+                else:
+                    info["hit"] = f"neutral_x{neutral_kills}" if neutral_kills > 1 else "neutral"
+                
+                # Additional multi-target efficiency bonus
+                if len(hits) > 1:
+                    efficiency_bonus = 0.3 * (len(hits) - 1)
+                    reward += efficiency_bonus
+        
         elif action != 0 and not can_fire:
-            reward -= 0.02
-        elif action == 0:
-            # Smaller penalty for strategic waiting
-            reward -= 0.001
-        else:
-            reward -= 0.005
-
+            # PENALTY FOR SHOOTING TOO FAST
+            reward -= 0.1  # Increased penalty for spamming
+        
+        # Move entities
         self._move()
 
-        # turret hit handling - FIXED
+        # TURRET HIT HANDLING
         enemy_hits = [
             e for e in self.entities
             if e["type"] == "enemy" and
@@ -282,6 +455,13 @@ class TurretEnv(gym.Env):
         if enemy_hits:
             self.turret_hits += len(enemy_hits)
             
+            # Add explosion for each enemy that hits the turret
+            for e in enemy_hits:
+                info["explosion"].append({
+                    "pos": e["pos"].copy(),
+                    "type": "turret_hit"
+                })
+            
             # Remove enemies that hit the turret
             self.entities = [
                 e for e in self.entities
@@ -289,29 +469,72 @@ class TurretEnv(gym.Env):
                         np.linalg.norm(e["pos"] - self.agent_pos) <= self.kill_radius)
             ]
             
+            # SEVERE PENALTIES FOR TURRET HITS
+            hit_penalty = 5.0 * len(enemy_hits)
+            
+            # Escalating penalty for multiple hits
+            escalation_penalty = 2.0 * (self.turret_hits ** 2)
+            
+            # Progress penalty (getting hit later is worse)
+            progress_penalty = 1.0 * (self.steps / self.max_steps)
+            
+            total_hit_penalty = hit_penalty + escalation_penalty + progress_penalty
+            reward -= total_hit_penalty
+            
             if self.turret_hits >= 3:
-                reward -= 3.0
+                reward -= 15.0  # Severe final penalty
                 done = True
                 info["turret_destroyed"] = True
-            else:
-                reward -= 0.5 * len(enemy_hits) + 0.01 * self.steps
 
-        # Improved fog logic with gradual recovery
+        # FOG OF WAR HANDLING
         if self.fog_shrink_every and self.steps % self.fog_shrink_every == 0:
             if self.sensor_range > self.sensor_min:
                 self.sensor_range -= 1
+                # Small penalty for losing sensor range
+                reward -= 0.05
             elif self.steps % (self.fog_shrink_every * 2) == 0:
-                # Gradual recovery instead of instant reset
+                # Gradual recovery
                 self.sensor_range = min(self.sensor_range + 1, self.sensor_range_init)
+                # Small reward for regaining sensor range
+                reward += 0.03
+
+        # PROGRESS TRACKING
+        current_enemy_count = len([e for e in self.entities if e["type"] == "enemy"])
+        
+        # Small ongoing reward for maintaining fewer enemies
+        if current_enemy_count < self.last_enemy_count:
+            reward += 0.5  # Progress reward
+        
+        self.last_enemy_count = current_enemy_count
+
+        # TIME PRESSURE
+        time_pressure_penalty = 0.005 * (self.steps / self.max_steps)
+        reward -= time_pressure_penalty
 
         self.steps += 1
 
-        # final end check only if not done already
+        # FINAL OUTCOME CHECKS
         if not done:
             if not any(e["type"] == "enemy" for e in self.entities):
-                reward += 5.0
+                # VICTORY REWARD
+                victory_reward = 20.0
+                
+                # Time bonus for fast completion
+                time_bonus = 5.0 * (self.max_steps - self.steps) / self.max_steps
+                
+                # Ally preservation bonus
+                remaining_allies = len([e for e in self.entities if e["type"] == "ally"])
+                ally_bonus = 2.0 * remaining_allies
+                
+                total_victory_reward = victory_reward + time_bonus + ally_bonus
+                reward += total_victory_reward
                 done = True
+                
             elif self.steps >= self.max_steps:
+                # TIMEOUT PENALTY
+                remaining_enemies = len([e for e in self.entities if e["type"] == "enemy"])
+                timeout_penalty = 3.0 * remaining_enemies
+                reward -= timeout_penalty
                 done = True
 
         return self._get_obs(), reward, done, False, info
