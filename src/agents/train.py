@@ -14,8 +14,8 @@ from agents.callback_stats import StatsCallback
 from agents.callback_csv import EpisodeCSVCallback
 
 
-TOTAL_STEPS = 300_000
-CKPT_FREQ   = 10_000
+TOTAL_STEPS = 500_000
+CKPT_FREQ   = 50_000
 WORKERS     = 4
 save_freq_calls = CKPT_FREQ // WORKERS
 
@@ -48,14 +48,14 @@ def main():
             )),
 
             # Phase 2 – More targets, some movement variety
-            (50_000, dict(
+            (100_000, dict(
                 n_enemies=5,
                 enemy_move_every=6,
                 path_probs=(0.7, 0.2, 0.1),  # mostly straight, few zigzag
             )),
 
             # Phase 3 – Full mixed pathing, tighter timing
-            (100_000, dict(
+            (200_000, dict(
                 n_enemies=7,
                 enemy_move_every=5,
                 path_probs=(0.4, 0.35, 0.25),  # introduce erratic patterns
@@ -63,19 +63,19 @@ def main():
             )),
 
             # Phase 4 – Fire cooldown and reduced visibility
-            (175_000, dict(
+            (300_000, dict(
                 n_enemies=9,
                 enemy_move_every=4,
                 cooldown_steps=1,
-                sensor_min=2,
+                sensor_min=3,
             )),
 
             # Phase 5 – Final test: tight, reactive combat
-            (250_000, dict(
+            (400_000, dict(
                 n_enemies=11,
                 enemy_move_every=3,
-                cooldown_steps=2,
-                sensor_min=1,
+                cooldown_steps=1,
+                sensor_min=2,
                 path_probs=(0.33, 0.33, 0.34),  # full pathing entropy
             )),
         ],

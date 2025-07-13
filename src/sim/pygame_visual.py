@@ -2,165 +2,291 @@
 import sys, pygame, pathlib, math
 from envs.turret_env import TurretEnv
 
-# ───────── assets & constants ──────────────────────────────────────
+# ─────── assets & constants ────────────────────────────────
 CELL, MARGIN, FPS = 40, 2, 20
 SHAKE_MS, SHAKE_PIX = 50, 4
 
 ASSET_DIR   = pathlib.Path(__file__).resolve().parents[2] / "assets"
-EXP_SHEET   = pygame.image.load(ASSET_DIR / "explosion.png")
-EXP_FRAMES  = [EXP_SHEET.subsurface(pygame.Rect(col*32, row*32, 32, 32))
-               for row in range(4) for col in range(4)]
-EXP_FRAMES = [pygame.transform.smoothscale(f, (CELL, CELL))
-              for f in EXP_FRAMES]
 
-# ---- initialise mixer only if possible ----------------------------
-try:
-    if not pygame.mixer.get_init():
-        pygame.mixer.init()
-    SND_EXPLO = pygame.mixer.Sound(ASSET_DIR / "explosion.mp3")
-except pygame.error:
-    SND_EXPLO = None          # head-less ⇒ just skip sound
+# Load assets with error handling
+def load_assets():
+    """Load game assets with proper error handling"""
+    exp_sheet = None
+    exp_frames = []
+    snd_explo = None
+    
+    try:
+        exp_sheet = pygame.image.load(ASSET_DIR / "explosion.png")
+        exp_frames = [exp_sheet.subsurface(pygame.Rect(col*32, row*32, 32, 32))
+                     for row in range(4) for col in range(4)]
+        exp_frames = [pygame.transform.smoothscale(f, (CELL, CELL))
+                      for f in exp_frames]
+    except (pygame.error, FileNotFoundError) as e:
+        print(f"Warning: Could not load explosion sprite: {e}")
+        # Create simple colored rectangles as fallback
+        exp_frames = [pygame.Surface((CELL, CELL)) for _ in range(16)]
+        for i, frame in enumerate(exp_frames):
+            intensity = 255 - (i * 15)  # Fade out effect
+            frame.fill((intensity, intensity // 2, 0))
 
+    try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init()
+        snd_explo = pygame.mixer.Sound(ASSET_DIR / "explosion.mp3")
+    except (pygame.error, FileNotFoundError) as e:
+        print(f"Warning: Could not load explosion sound: {e}")
+        snd_explo = None
+
+    return exp_frames, snd_explo
+
+# Load assets at module level for backward compatibility
+EXP_FRAMES, SND_EXPLO = load_assets()
+
+# Color palette
 COL = dict(
-    bg   =(0, 0, 0),          # black background
-    grid =(255, 255, 255),    # white grid lines   ← NEW
-    und  =(25, 25, 25),       # very dark cell fill
-    sh   =(0, 0, 0, 80),      # soft shadow alpha
-    tur  =( 50, 120, 255),    # bright blue
-    enm  =(255,  60,  60),    # vivid red
-    ally =(  0, 255, 150),    # teal-green
-    neu  =(255, 255,  60),    # bright yellow
+    bg   =(0, 0, 0),
+    grid =(40, 40, 40),      # Darker grid for better visibility
+    und  =(25, 25, 25),
+    sh   =(0, 0, 0, 80),
+    tur  =(50, 120, 255),
+    enm  =(255, 60, 60),
+    ally =(0, 255, 150),
+    neu  =(255, 255, 60),
+    text =(255, 255, 255),
+    text_bg=(0, 0, 0, 128),  # Semi-transparent background for text
 )
 
-KEY2ACT = {pygame.K_UP:1,pygame.K_DOWN:2,pygame.K_LEFT:3,pygame.K_RIGHT:4,
-           pygame.K_q:5,pygame.K_e:6,pygame.K_z:7,pygame.K_c:8,
-           pygame.K_SPACE:0}
+KEY2ACT = {
+    pygame.K_UP: 1, pygame.K_DOWN: 2, pygame.K_LEFT: 3, pygame.K_RIGHT: 4,
+    pygame.K_q: 5, pygame.K_e: 6, pygame.K_z: 7, pygame.K_c: 8,
+    pygame.K_SPACE: 0
+}
 
-# ───────── helper ─────────────────────────────────────────────────
-def _shadow_rect(x, y):
-    return pygame.Rect(y*CELL+MARGIN, x*CELL+MARGIN,
-                       CELL-2*MARGIN, CELL-2*MARGIN)
+# ─────── helper functions ───────────────────────────────
 
-# ───────── draw  ──────────────────────────────────────────────────
+def shadow_rect(x, y):
+    """Create a rectangle with margin for shadows"""
+    return pygame.Rect(y*CELL + MARGIN, x*CELL + MARGIN,
+                       CELL - 2*MARGIN, CELL - 2*MARGIN)
+
+def calculate_shake_offset(shake_off):
+    """Calculate screen shake offset with smooth decay"""
+    if shake_off <= 0:
+        return 0, 0
+    
+    # Use sine waves for smooth shake
+    off_x = int(math.sin(shake_off * 31) * SHAKE_PIX * (shake_off / (SHAKE_MS // (1000 // FPS))))
+    off_y = int(math.cos(shake_off * 17) * SHAKE_PIX * (shake_off / (SHAKE_MS // (1000 // FPS))))
+    return off_x, off_y
+
+def draw_text_with_background(surf, font, text, pos, text_color=COL["text"], bg_color=COL["text_bg"]):
+    """Draw text with semi-transparent background for better readability"""
+    text_surf = font.render(text, True, text_color)
+    text_rect = text_surf.get_rect(topleft=pos)
+    
+    # Create background surface
+    bg_surf = pygame.Surface((text_rect.width + 8, text_rect.height + 4), pygame.SRCALPHA)
+    bg_surf.fill(bg_color)
+    
+    surf.blit(bg_surf, (text_rect.x - 4, text_rect.y - 2))
+    surf.blit(text_surf, pos)
+
+# ─────── main drawing function ──────────────────────────────
+
 def draw(env, surf, font, fps, step, score, kills, time_left,
-         explosions, shake_off, mission_banner):
-
+         explosions, shake_off, mission_banner=None):
+    """Main drawing function with improved organization"""
+    
     gs = env.gs
     surf.fill(COL["bg"])
+    
+    # Calculate shake offset
+    off_x, off_y = calculate_shake_offset(shake_off)
+    
+    # Draw grid background
+    draw_grid(surf, gs, off_x, off_y)
+    
+    # Draw entities
+    draw_entities(surf, env, off_x, off_y)
+    
+    # Draw turret
+    draw_turret(surf, env, off_x, off_y)
+    
+    # Draw explosions
+    draw_explosions(surf, explosions, EXP_FRAMES, off_x, off_y)
+    
+    # Draw HUD
+    draw_hud(surf, font, fps, step, env.max_steps, score, kills, time_left, env.turret_hits)
+    
+    pygame.display.flip()
+    
+    return max(0, shake_off - 1)
 
-    # camera shake
-    if shake_off:
-        off_x = int(math.sin(shake_off*31) * SHAKE_PIX)
-        off_y = int(math.cos(shake_off*17) * SHAKE_PIX)
-        shake_off -= 1
-    else:
-        off_x = off_y = 0
-
-    # cells + shadows
+def draw_grid(surf, gs, off_x, off_y):
+    """Draw the game grid"""
+    # Draw cell backgrounds
     grid_surf = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
     for x in range(gs):
         for y in range(gs):
-            pygame.draw.rect(grid_surf, COL["und"], _shadow_rect(x, y))
-            pygame.draw.rect(grid_surf, COL["sh"],  _shadow_rect(x, y))
+            pygame.draw.rect(grid_surf, COL["und"], shadow_rect(x, y))
+            pygame.draw.rect(grid_surf, COL["sh"], shadow_rect(x, y))
     surf.blit(grid_surf, (off_x, off_y))
-
-    # white grid lines  ← NEW
+    
+    # Draw grid lines
     for i in range(gs + 1):
         x = i * CELL + off_x
         y = i * CELL + off_y
         pygame.draw.line(surf, COL["grid"], (x, 0), (x, gs*CELL), 1)
         pygame.draw.line(surf, COL["grid"], (0, y), (gs*CELL, y), 1)
 
-    # entities
+def draw_entities(surf, env, off_x, off_y):
+    """Draw all entities (enemies, allies, neutrals)"""
+    entity_colors = {"enemy": "enm", "ally": "ally", "neutral": "neu"}
+    
     for e in env.entities:
         x, y = e["pos"]
-        col  = COL[{"enemy":"enm","ally":"ally","neutral":"neu"}[e["type"]]]
-        pygame.draw.rect(surf, col, _shadow_rect(x, y).move(off_x, off_y))
+        col = COL[entity_colors[e["type"]]]
+        entity_rect = shadow_rect(x, y).move(off_x, off_y)
+        pygame.draw.rect(surf, col, entity_rect)
+        
+        # Add border for better visibility
+        pygame.draw.rect(surf, (255, 255, 255), entity_rect, 1)
 
-    # turret
+def draw_turret(surf, env, off_x, off_y):
+    """Draw the player turret"""
     tx, ty = env.agent_pos
-    pygame.draw.rect(surf, COL["tur"], _shadow_rect(tx, ty).move(off_x, off_y))
+    turret_rect = shadow_rect(tx, ty).move(off_x, off_y)
+    pygame.draw.rect(surf, COL["tur"], turret_rect)
+    
+    # Add turret border
+    pygame.draw.rect(surf, (255, 255, 255), turret_rect, 2)
 
-    # explosion animation
+def draw_explosions(surf, explosions, exp_frames, off_x, off_y):
+    """Draw explosion animations"""
     for ex in explosions[:]:
-        if ex["frame"] >= len(EXP_FRAMES):
-            explosions.remove(ex); continue
-        img = EXP_FRAMES[ex["frame"]]
+        if ex["frame"] >= len(exp_frames):
+            explosions.remove(ex)
+            continue
+        
+        img = exp_frames[ex["frame"]]
         px, py = ex["pos"]
         surf.blit(img, (py*CELL + off_x, px*CELL + off_y))
         ex["frame"] += 1
 
-    # HUD
-    hud = font.render(
-        f"FPS {fps:>4.1f}   step {step}/{env.max_steps}   "
-        f"reward {score:6.2f}   kills {kills}   T-{time_left}",
-        True, (255, 255, 255)
-    )
-    surf.blit(hud, (6, 4))
+def draw_hud(surf, font, fps, step, max_steps, score, kills, time_left, turret_hits):
+    """Draw the heads-up display"""
+    max_hits = 3
+    hits_left = max_hits - turret_hits
+    
+    # Main HUD line
+    hud_text = (f"FPS {fps:>4.1f}   step {step}/{max_steps}   "
+                f"reward {score:6.2f}   kills {kills}   T-{time_left}   "
+                f"health {hits_left}/{max_hits}")
+    
+    draw_text_with_background(surf, font, hud_text, (6, 4))
+    
+    # Health bar visualization
+    health_bar_width = 100
+    health_bar_height = 8
+    health_ratio = hits_left / max_hits
+    
+    # Health bar background
+    health_bg_rect = pygame.Rect(6, 35, health_bar_width, health_bar_height)
+    pygame.draw.rect(surf, (60, 60, 60), health_bg_rect)
+    
+    # Health bar fill
+    health_fill_width = int(health_bar_width * health_ratio)
+    health_fill_rect = pygame.Rect(6, 35, health_fill_width, health_bar_height)
+    
+    # Color based on health level
+    if health_ratio > 0.66:
+        health_color = (0, 255, 0)
+    elif health_ratio > 0.33:
+        health_color = (255, 255, 0)
+    else:
+        health_color = (255, 0, 0)
+    
+    pygame.draw.rect(surf, health_color, health_fill_rect)
+    pygame.draw.rect(surf, (255, 255, 255), health_bg_rect, 1)
 
-    # mission banner (currently disabled)  ← REMOVED / COMMENTED
-    # if mission_banner:
-    #     banner = font.render(mission_banner, True, (255, 255, 0))
-    #     bx = (surf.get_width() - banner.get_width()) // 2
-    #     surf.blit(banner, (bx, surf.get_height()//2 - 10))
+# ─────── main viewer ──────────────────────────
 
-    pygame.display.flip()
-    return shake_off
-
-# ───────── main viewer ────────────────────────────────────────────
 def main():
-    pygame.init(); pygame.mixer.init()
-    env  = TurretEnv()
+    """Main game loop"""
+    pygame.init()
+    pygame.mixer.init()
+    
+    # Initialize game
+    env = TurretEnv()
     surf = pygame.display.set_mode((env.gs*CELL, env.gs*CELL))
-    font = pygame.font.SysFont(None, 32)
-    clock= pygame.time.Clock()
-
-    obs, _      = env.reset(); env.observation = obs
-    last_act    = 0
+    pygame.display.set_caption("Turret Defense - Night Theme")
+    font = pygame.font.SysFont('Arial', 24)  # Use Arial for better readability
+    clock = pygame.time.Clock()
+    
+    # Game state
+    obs, _ = env.reset()
+    env.observation = obs
+    last_act = 0
     step = score = kills = 0
-    explosions  = []
-    shake_off   = 0
-    # banner      = None  # banner logic disabled  ← REMOVED
-
+    explosions = []
+    shake_off = 0
+    
+    # Game loop
     running = True
     while running:
+        # Handle events
         for e in pygame.event.get():
-            if e.type == pygame.QUIT: running = False
+            if e.type == pygame.QUIT:
+                running = False
             elif e.type == pygame.KEYDOWN:
-                if e.key in KEY2ACT: last_act = KEY2ACT[e.key]
+                if e.key in KEY2ACT:
+                    last_act = KEY2ACT[e.key]
                 elif e.key == pygame.K_r:
-                    obs, _ = env.reset(); env.observation = obs
+                    # Reset game
+                    obs, _ = env.reset()
+                    env.observation = obs
                     last_act = step = score = kills = 0
                     explosions.clear()
-                    # banner = None
+                    shake_off = 0
                 elif e.key in (pygame.K_ESCAPE, pygame.K_x):
                     running = False
-
-        obs, r, done, _, info = env.step(last_act); env.observation = obs
-        step += 1; score += r
-        if info.get("hit") == "enemy": kills += 1
+        
+        # Update game state
+        obs, r, done, _, info = env.step(last_act)
+        env.observation = obs
+        step += 1
+        score += r
+        
+        # Handle game events
+        if info.get("hit") == "enemy":
+            kills += 1
+        
         if info.get("explosion"):
             explosions.append(dict(pos=info["explosion"], frame=0))
             shake_off = SHAKE_MS // (1000 // FPS)
-            if SND_EXPLO: 
+            if SND_EXPLO:
                 SND_EXPLO.play()
-
+        
+        # Draw everything
         shake_off = draw(
             env, surf, font, clock.get_fps(),
             step, score, kills,
             env.max_steps - step,
-            explosions, shake_off,
-            mission_banner=None          # always None now
+            explosions, shake_off
         )
+        
         clock.tick(FPS)
-
+        
+        # Reset on game over
         if done:
-            # episode reset (no banner)
-            obs, _ = env.reset(); env.observation = obs
+            obs, _ = env.reset()
+            env.observation = obs
             last_act = step = score = kills = 0
             explosions.clear()
-
-    pygame.quit(); sys.exit()
+            shake_off = 0
+    
+    pygame.quit()
+    sys.exit()
 
 
 if __name__ == "__main__":

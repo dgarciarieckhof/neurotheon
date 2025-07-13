@@ -23,26 +23,21 @@ from .sensors import detect
 class TurretEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    # ────────────────────────────────────────────────────────────────
     def __init__(
         self,
         grid_size: int = 31,
         max_steps: int = 300,
-        sensor_range: int = 6,        # initial range
-        sensor_min: int = 3,          # min range when fog is thick
-        fog_shrink_every: int = 25,   # steps before range–1 (then reset)
+        sensor_range: int = 10,
+        sensor_min: int = 4,
+        fog_shrink_every: int = 15,
         kill_radius: int = 1,
         safe_spawn_radius: int = 3,
-
         enemy_move_every: int = 5,
         ally_move_every: int = 10,
-
-        cooldown_steps: int = 1,      # turret cooldown
-
+        cooldown_steps: int = 1,
         path_probs: tuple[float, float, float] = (0.6, 0.25, 0.15),
         zigzag_period: int = 4,
         spiral_radius: int = 4,
-
         n_enemies: int = 7,
         n_allies: int = 4,
         n_neutrals: int = 3,
@@ -53,10 +48,8 @@ class TurretEnv(gym.Env):
     ):
         super().__init__()
 
-        # core params
         self.gs = grid_size
         self.max_steps = max_steps
-
         self.sensor_range_init = sensor_range
         self.sensor_range = sensor_range
         self.sensor_min = sensor_min
@@ -64,13 +57,10 @@ class TurretEnv(gym.Env):
 
         self.kill_radius = kill_radius
         self.safe_spawn_radius = safe_spawn_radius
-
         self.enemy_move_every = enemy_move_every
         self.ally_move_every = ally_move_every
-
         self.cooldown_steps = cooldown_steps
         self.last_shot_step = -cooldown_steps
-
         self.path_probs = path_probs
         self.zigzag_period = zigzag_period
         self.spiral_radius = spiral_radius
@@ -86,7 +76,6 @@ class TurretEnv(gym.Env):
             neutral_stealth=neutral_stealth,
         )
 
-        # actions: idle + 8 ray-cast directions
         self.vec = {
             0: np.array([0, 0]),
             1: np.array([-1, 0]), 2: np.array([1, 0]),
@@ -94,6 +83,7 @@ class TurretEnv(gym.Env):
             5: np.array([-1, -1]), 6: np.array([-1, 1]),
             7: np.array([1, -1]), 8: np.array([1, 1]),
         }
+
         self.action_space = spaces.Discrete(9)
         self.observation_space = spaces.Box(
             0, 1, shape=(self.gs, self.gs, 3), dtype=np.float32
@@ -103,26 +93,44 @@ class TurretEnv(gym.Env):
         self.agent_pos = np.array([centre, centre])
         self.reset()
 
-    # ───────────────────────── helpers ──────────────────────────────
+    def _is_valid_position(self, pos: np.ndarray) -> bool:
+        """Check if position is within grid bounds"""
+        return 0 <= pos[0] < self.gs and 0 <= pos[1] < self.gs
+
+    def _is_safe_spawn(self, pos: np.ndarray, used: set[tuple[int, int]]) -> bool:
+        """Check if position is safe for spawning (not too close to turret or other entities)"""
+        if tuple(pos) in used:
+            return False
+        if np.linalg.norm(pos - self.agent_pos) < self.safe_spawn_radius:
+            return False
+        # Check minimum spacing between entities
+        for existing_pos in used:
+            if np.linalg.norm(pos - np.array(existing_pos)) < 2:
+                return False
+        return True
+
     def _random_cell(self, used: set[tuple[int, int]]) -> np.ndarray:
-        while True:
-            p = tuple(self.rng.integers(0, self.gs, 2))
-            if p in used:
-                continue
-            if np.linalg.norm(np.array(p) - self.agent_pos) >= self.safe_spawn_radius:
-                used.add(p)
-                return np.array(p)
+        max_attempts = 100
+        for _ in range(max_attempts):
+            p = self.rng.integers(0, self.gs, 2)
+            if self._is_safe_spawn(p, used):
+                used.add(tuple(p))
+                return p
+        # Fallback: find any valid position
+        for x in range(self.gs):
+            for y in range(self.gs):
+                p = np.array([x, y])
+                if self._is_safe_spawn(p, used):
+                    used.add(tuple(p))
+                    return p
+        raise RuntimeError("Cannot find valid spawn position")
 
     def _spawn_entities(self):
         used = {tuple(self.agent_pos)}
         ents = []
 
-        # ─ enemies with pathing mode
         for _ in range(self.cfg["n_enemies"]):
-            mode = self.rng.choice(
-                ["direct", "zigzag", "spiral"],
-                p=self.path_probs
-            )
+            mode = self.rng.choice(["direct", "zigzag", "spiral"], p=self.path_probs)
             ents.append(dict(
                 pos=self._random_cell(used),
                 type="enemy",
@@ -132,7 +140,6 @@ class TurretEnv(gym.Env):
                 stealth=self.rng.uniform(*self.cfg["enemy_stealth"]),
             ))
 
-        # ─ allies
         for _ in range(self.cfg["n_allies"]):
             ents.append(dict(
                 pos=self._random_cell(used),
@@ -140,13 +147,13 @@ class TurretEnv(gym.Env):
                 stealth=self.cfg["ally_stealth"],
             ))
 
-        # ─ neutrals (static)
         for _ in range(self.cfg["n_neutrals"]):
             ents.append(dict(
                 pos=self._random_cell(used),
                 type="neutral",
                 stealth=self.cfg["neutral_stealth"],
             ))
+
         return ents
 
     def _get_obs(self):
@@ -154,74 +161,81 @@ class TurretEnv(gym.Env):
         for e in self.entities:
             if detect(e, self.agent_pos, self.sensor_range, self.rng):
                 x, y = e["pos"]
-                if e["type"] == "enemy":
-                    obs[x, y, 0] = 1
-                elif e["type"] == "ally":
-                    obs[x, y, 1] = 1
-                else:  # neutral
-                    obs[x, y, 0] = obs[x, y, 1] = 1
+                # Add bounds checking for observation
+                if 0 <= x < self.gs and 0 <= y < self.gs:
+                    if e["type"] == "enemy":
+                        obs[x, y, 0] = 1
+                    elif e["type"] == "ally":
+                        obs[x, y, 1] = 1
+                    else:  # neutral
+                        obs[x, y, 0] = obs[x, y, 1] = 1
         ax, ay = self.agent_pos
         obs[ax, ay, 2] = 1
         return obs
 
-    # ───────────────────── movement logic ──────────────────────────
     def _move(self):
-        # enemies
         if self.steps % self.enemy_move_every == 0:
             for e in self.entities:
                 if e["type"] != "enemy":
                     continue
+                
                 if e["mode"] == "direct":
-                    e["pos"] += np.sign(self.agent_pos - e["pos"])
-
+                    step = np.sign(self.agent_pos - e["pos"])
                 elif e["mode"] == "zigzag":
                     main = np.sign(self.agent_pos - e["pos"])
-                    perp = main[::-1] * np.array([1, -1])  # rotate 90°
-                    if e["zig_state"] // self.zigzag_period % 2 == 0:
+                    perp = main[::-1] * np.array([1, -1])
+                    # Improved zigzag calculation
+                    if e["zig_state"] % (self.zigzag_period * 2) < self.zigzag_period:
                         step = main
                     else:
                         step = perp
                     e["zig_state"] += 1
-                    e["pos"] += step
-
                 else:  # spiral
-                    # rotate step around centre, gradually tighten
                     radial = np.sign(self.agent_pos - e["pos"])
                     tang = np.array([-radial[1], radial[0]])
-                    e["spiral_angle"] += np.pi / self.spiral_radius
+                    # Wrap angle to prevent overflow
+                    e["spiral_angle"] = (e["spiral_angle"] + np.pi / self.spiral_radius) % (2 * np.pi)
                     step = np.round(
                         np.cos(e["spiral_angle"]) * radial +
                         np.sin(e["spiral_angle"]) * tang
                     ).astype(int)
-                    e["pos"] += step
+                
+                # Better bounds checking instead of clipping
+                new_pos = e["pos"] + step
+                if self._is_valid_position(new_pos):
+                    e["pos"] = new_pos
+                else:
+                    # Try alternative moves if blocked
+                    for alt_step in [np.array([1, 0]), np.array([-1, 0]), np.array([0, 1]), np.array([0, -1])]:
+                        alt_pos = e["pos"] + alt_step
+                        if self._is_valid_position(alt_pos):
+                            e["pos"] = alt_pos
+                            break
 
-                e["pos"] = np.clip(e["pos"], 0, self.gs - 1)
-
-        # allies drift
         if self.steps % self.ally_move_every == 0:
             choices = list(self.vec.values())[1:]
             for e in self.entities:
                 if e["type"] != "ally":
                     continue
-                e["pos"] = np.clip(
-                    e["pos"] + self.rng.choice(choices),
-                    0, self.gs - 1
-                )
+                step = self.rng.choice(choices)
+                new_pos = e["pos"] + step
+                if self._is_valid_position(new_pos):
+                    e["pos"] = new_pos
 
-    # ───────────────────── Gym API ─────────────────────────────────
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.entities = self._spawn_entities()
         self.steps = 0
         self.sensor_range = self.sensor_range_init
         self.last_shot_step = -self.cooldown_steps
+        self.turret_hits = 0
+        self.ally_hit_count = 0
         return self._get_obs(), {}
 
     def step(self, action: int):
         info = {"hit": None, "explosion": None, "turret_destroyed": False}
         reward, done = 0.0, False
 
-        # ─── shooting with cooldown
         can_fire = (self.steps - self.last_shot_step) >= self.cooldown_steps
         if action != 0 and can_fire:
             self.last_shot_step = self.steps
@@ -237,44 +251,70 @@ class TurretEnv(gym.Env):
                     e = self.entities.pop(idx)
                     info["explosion"] = pos.copy()
                     if e["type"] == "enemy":
-                        reward += 1.0; info["hit"] = "enemy"
+                        reward += 2.0 + 0.01 * (self.max_steps - self.steps)
+                        info["hit"] = "enemy"
                     elif e["type"] == "ally":
-                        reward -= 1.0; info["hit"] = "ally"
+                        self.ally_hit_count += 1
+                        penalty = 1.0 + 0.2 * self.ally_hit_count
+                        reward -= penalty
+                        info["hit"] = "ally"
                     else:
-                        reward -= 0.4; info["hit"] = "neutral"
+                        reward -= 0.3
+                        info["hit"] = "neutral"
                     break
-
         elif action != 0 and not can_fire:
-            reward -= 0.05   # tried to shoot too early
+            reward -= 0.02
+        elif action == 0:
+            # Smaller penalty for strategic waiting
+            reward -= 0.001
         else:
-            reward -= 0.01   # idle
+            reward -= 0.005
 
-        # ─── move entities, fog-of-war update
         self._move()
 
-        # proximity defeat
-        for e in self.entities:
-            if e["type"] == "enemy" and \
-               np.linalg.norm(e["pos"] - self.agent_pos) <= self.kill_radius:
+        # turret hit handling - FIXED
+        enemy_hits = [
+            e for e in self.entities
+            if e["type"] == "enemy" and
+            np.linalg.norm(e["pos"] - self.agent_pos) <= self.kill_radius
+        ]
+
+        if enemy_hits:
+            self.turret_hits += len(enemy_hits)
+            
+            # Remove enemies that hit the turret
+            self.entities = [
+                e for e in self.entities
+                if not (e["type"] == "enemy" and 
+                        np.linalg.norm(e["pos"] - self.agent_pos) <= self.kill_radius)
+            ]
+            
+            if self.turret_hits >= 3:
+                reward -= 3.0
                 done = True
                 info["turret_destroyed"] = True
-                reward -= 5.0
-                break
+            else:
+                reward -= 0.5 * len(enemy_hits) + 0.01 * self.steps
 
-        # sensor range breathing
+        # Improved fog logic with gradual recovery
         if self.fog_shrink_every and self.steps % self.fog_shrink_every == 0:
             if self.sensor_range > self.sensor_min:
                 self.sensor_range -= 1
-            else:
-                self.sensor_range = self.sensor_range_init
+            elif self.steps % (self.fog_shrink_every * 2) == 0:
+                # Gradual recovery instead of instant reset
+                self.sensor_range = min(self.sensor_range + 1, self.sensor_range_init)
 
-        # episode end?
         self.steps += 1
-        if self.steps >= self.max_steps or \
-           not any(e["type"] == "enemy" for e in self.entities):
-            done = True
+
+        # final end check only if not done already
+        if not done:
+            if not any(e["type"] == "enemy" for e in self.entities):
+                reward += 5.0
+                done = True
+            elif self.steps >= self.max_steps:
+                done = True
 
         return self._get_obs(), reward, done, False, info
 
-    def render(self):  # viewer handles drawing
+    def render(self):
         pass
