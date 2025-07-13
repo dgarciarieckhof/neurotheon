@@ -337,7 +337,7 @@ class TurretEnv(gym.Env):
                     info["explosion"] = pos.copy()
                     info["shot_trajectory"] = self.shot_trajectory  # For visual effects
                     if e["type"] == "enemy":
-                        reward += 2.0 + 0.01 * (self.max_steps - self.steps)
+                        reward += 3.0 + 0.01 * (self.max_steps - self.steps)
                         info["hit"] = "enemy"
                     elif e["type"] == "ally":
                         self.ally_hit_count += 1
@@ -345,7 +345,7 @@ class TurretEnv(gym.Env):
                         reward -= penalty
                         info["hit"] = "ally"
                     else:
-                        reward -= 0.3
+                        reward -= 0.5
                         info["hit"] = "neutral"
                     break
         elif action != 0 and not can_fire:
