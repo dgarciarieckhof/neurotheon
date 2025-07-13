@@ -1,16 +1,18 @@
 """
-turret_env.py - Enhanced with visual effect support
-───────────────────────────────────────────────────
+turret_env.py - Enhanced with dual shooting capability
+─────────────────────────────────────────────────────
 • Fixed turret at grid centre (21 × 21 board)
-• Instant 8-direction ray-cast (idle + ↑ ↓ ← → ↖ ↗ ↙ ↘)
+• Dual-shot system: can shoot two enemies simultaneously in different directions
+• 8-direction ray-cast (idle + ↑ ↓ ← → ↖ ↗ ↙ ↘)
+• Enhanced action space for dual shooting combinations
 • Enemies advance toward turret every `enemy_move_every` steps
 • Allies drift randomly every `ally_move_every` steps
 • Neutrals are static yellow blocks
 • Safe spawn: no entity within `safe_spawn_radius`
-• Explosion coordinate returned in info dict for one-frame flash
-• Enemy pathing modes: direct / zig-zag / spiral.
-• Turret fire-rate cooldown (cannot spam shots).
-• Dynamic fog-of-war: sensor range shrinks, then resets.
+• Explosion coordinates returned in info dict for visual effects
+• Enemy pathing modes: direct / zig-zag / spiral
+• Turret fire-rate cooldown (cannot spam shots)
+• Dynamic fog-of-war: sensor range shrinks, then resets
 • Enhanced visual support: shot trajectories, entity IDs, last action tracking
 """
 
@@ -19,6 +21,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from .sensors import detect
+from itertools import combinations
 
 
 class TurretEnv(gym.Env):
@@ -36,6 +39,7 @@ class TurretEnv(gym.Env):
         enemy_move_every: int = 5,
         ally_move_every: int = 10,
         cooldown_steps: int = 1,
+        dual_shot_cooldown: int = 3,  # Higher cooldown for dual shots
         path_probs: tuple[float, float, float] = (0.6, 0.25, 0.15),
         zigzag_period: int = 4,
         spiral_radius: int = 4,
@@ -61,7 +65,9 @@ class TurretEnv(gym.Env):
         self.enemy_move_every = enemy_move_every
         self.ally_move_every = ally_move_every
         self.cooldown_steps = cooldown_steps
+        self.dual_shot_cooldown = dual_shot_cooldown
         self.last_shot_step = -cooldown_steps
+        self.last_dual_shot_step = -dual_shot_cooldown
         self.path_probs = path_probs
         self.zigzag_period = zigzag_period
         self.spiral_radius = spiral_radius
@@ -85,7 +91,9 @@ class TurretEnv(gym.Env):
             7: np.array([1, -1]), 8: np.array([1, 1]),
         }
 
-        self.action_space = spaces.Discrete(9)
+        # Create action mapping for dual shots
+        self._create_action_mapping()
+
         self.observation_space = spaces.Box(
             0, 1, shape=(self.gs, self.gs, 3), dtype=np.float32
         )
@@ -95,11 +103,37 @@ class TurretEnv(gym.Env):
         
         # Enhanced visual support attributes
         self.last_action = 0
-        self.shot_trajectory = None  # For visual effects
+        self.shot_trajectories = []  # Multiple trajectories for dual shots
         self.entity_id_counter = 0   # For tracking entity movement
         self.previous_entities = []  # For movement tracking
         
         self.reset()
+
+    def _create_action_mapping(self):
+        """Create action mapping for single shots, dual shots, and idle"""
+        self.action_mapping = {}
+        action_idx = 0
+        
+        # Action 0: Idle (no shot)
+        self.action_mapping[action_idx] = {"type": "idle", "directions": []}
+        action_idx += 1
+        
+        # Actions 1-8: Single shots in 8 directions
+        for direction in range(1, 9):
+            self.action_mapping[action_idx] = {"type": "single", "directions": [direction]}
+            action_idx += 1
+        
+        # Actions 9-36: Dual shots (combinations of 2 different directions)
+        for dir1, dir2 in combinations(range(1, 9), 2):
+            self.action_mapping[action_idx] = {"type": "dual", "directions": [dir1, dir2]}
+            action_idx += 1
+        
+        self.action_space = spaces.Discrete(action_idx)
+        
+        # Create reverse mapping for convenience
+        self.reverse_action_mapping = {v["type"]: [] for v in self.action_mapping.values()}
+        for action_idx, action_info in self.action_mapping.items():
+            self.reverse_action_mapping[action_info["type"]].append(action_idx)
 
     def _is_valid_position(self, pos: np.ndarray) -> bool:
         """Check if position is within grid bounds"""
@@ -193,17 +227,17 @@ class TurretEnv(gym.Env):
         obs[ax, ay, 2] = 1
         return obs
 
-    def _calculate_shot_trajectory(self, action: int) -> list[np.ndarray]:
+    def _calculate_shot_trajectory(self, direction: int) -> list[np.ndarray]:
         """Calculate the complete trajectory of a shot for visual effects"""
-        if action == 0:
+        if direction == 0:
             return []
         
         trajectory = []
         pos = self.agent_pos.copy()
-        direction = self.vec[action]
+        direction_vec = self.vec[direction]
         
         while True:
-            pos = pos + direction
+            pos = pos + direction_vec
             if not self._is_valid_position(pos):
                 break
             trajectory.append(pos.copy())
@@ -213,6 +247,42 @@ class TurretEnv(gym.Env):
                 break
         
         return trajectory
+
+    def _process_shot(self, direction: int) -> tuple[float, dict]:
+        """Process a single shot in the given direction"""
+        reward = 0.0
+        shot_info = {"hit": None, "explosion": None, "trajectory": []}
+        
+        trajectory = self._calculate_shot_trajectory(direction)
+        shot_info["trajectory"] = trajectory
+        
+        pos = self.agent_pos.copy()
+        while True:
+            pos = pos + self.vec[direction]
+            x, y = pos
+            if not (0 <= x < self.gs and 0 <= y < self.gs):
+                break
+            
+            idx = next((i for i, e in enumerate(self.entities)
+                       if np.array_equal(e["pos"], pos)), None)
+            if idx is not None:
+                e = self.entities.pop(idx)
+                shot_info["explosion"] = pos.copy()
+                
+                if e["type"] == "enemy":
+                    reward += 3.0 + 0.01 * (self.max_steps - self.steps)
+                    shot_info["hit"] = "enemy"
+                elif e["type"] == "ally":
+                    self.ally_hit_count += 1
+                    penalty = 1.0 + 0.2 * self.ally_hit_count
+                    reward -= penalty
+                    shot_info["hit"] = "ally"
+                else:
+                    reward -= 0.5
+                    shot_info["hit"] = "neutral"
+                break
+        
+        return reward, shot_info
 
     def _move(self):
         # Store previous positions for movement tracking
@@ -267,9 +337,12 @@ class TurretEnv(gym.Env):
                 if self._is_valid_position(new_pos):
                     e["pos"] = new_pos
 
-    def can_fire(self) -> bool:
+    def can_fire(self, shot_type: str = "single") -> bool:
         """Check if turret can fire (not on cooldown)"""
-        return (self.steps - self.last_shot_step) >= self.cooldown_steps
+        if shot_type == "dual":
+            return (self.steps - self.last_dual_shot_step) >= self.dual_shot_cooldown
+        else:
+            return (self.steps - self.last_shot_step) >= self.cooldown_steps
 
     def get_nearest_enemy(self) -> dict | None:
         """Get the nearest enemy entity for turret targeting"""
@@ -295,74 +368,115 @@ class TurretEnv(gym.Env):
                     enemies_in_range.append(e)
         return enemies_in_range
 
+    def get_action_description(self, action: int) -> str:
+        """Get human-readable description of action"""
+        if action not in self.action_mapping:
+            return f"Invalid action: {action}"
+        
+        action_info = self.action_mapping[action]
+        if action_info["type"] == "idle":
+            return "Idle (no shot)"
+        elif action_info["type"] == "single":
+            direction_names = ["", "N", "S", "W", "E", "NW", "NE", "SW", "SE"]
+            dir_name = direction_names[action_info["directions"][0]]
+            return f"Single shot {dir_name}"
+        else:  # dual
+            direction_names = ["", "N", "S", "W", "E", "NW", "NE", "SW", "SE"]
+            dir1_name = direction_names[action_info["directions"][0]]
+            dir2_name = direction_names[action_info["directions"][1]]
+            return f"Dual shot {dir1_name} + {dir2_name}"
+
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.entities = self._spawn_entities()
         self.steps = 0
         self.sensor_range = self.sensor_range_init
         self.last_shot_step = -self.cooldown_steps
+        self.last_dual_shot_step = -self.dual_shot_cooldown
         self.turret_hits = 0
         self.ally_hit_count = 0
         
         # Reset visual tracking
         self.last_action = 0
-        self.shot_trajectory = None
+        self.shot_trajectories = []
         self.previous_entities = []
         
         return self._get_obs(), {}
 
     def step(self, action: int):
-        info = {"hit": None, "explosion": None, "turret_destroyed": False}
+        info = {"hit": None, "explosion": None, "explosions": [], "turret_destroyed": False, "shots_fired": []}
         reward, done = 0.0, False
         
         # Store the action for visual effects
         self.last_action = action
         
-        # Calculate shot trajectory for visual effects
-        self.shot_trajectory = self._calculate_shot_trajectory(action)
-
-        can_fire = self.can_fire()
-        if action != 0 and can_fire:
-            self.last_shot_step = self.steps
-            pos = self.agent_pos.copy()
-            while True:
-                pos = pos + self.vec[action]
-                x, y = pos
-                if not (0 <= x < self.gs and 0 <= y < self.gs):
-                    break
-                idx = next((i for i, e in enumerate(self.entities)
-                            if np.array_equal(e["pos"], pos)), None)
-                if idx is not None:
-                    e = self.entities.pop(idx)
-                    info["explosion"] = pos.copy()
-                    info["shot_trajectory"] = self.shot_trajectory  # For visual effects
-                    if e["type"] == "enemy":
-                        reward += 3.0 + 0.01 * (self.max_steps - self.steps)
-                        info["hit"] = "enemy"
-                    elif e["type"] == "ally":
-                        self.ally_hit_count += 1
-                        penalty = 1.0 + 0.2 * self.ally_hit_count
-                        reward -= penalty
-                        info["hit"] = "ally"
-                    else:
-                        reward -= 0.5
-                        info["hit"] = "neutral"
-                    break
-        elif action != 0 and not can_fire:
-            reward -= 0.02
-            info["cooldown_violation"] = True  # For visual feedback
-        elif action == 0:
-            # Smaller penalty for strategic waiting
+        # Get action info
+        if action not in self.action_mapping:
+            raise ValueError(f"Invalid action: {action}")
+        
+        action_info = self.action_mapping[action]
+        self.shot_trajectories = []
+        
+        # Process shooting
+        if action_info["type"] == "idle":
+            # Small penalty for strategic waiting
             reward -= 0.001
-        else:
-            reward -= 0.005
+            
+        elif action_info["type"] == "single":
+            if self.can_fire("single"):
+                self.last_shot_step = self.steps
+                direction = action_info["directions"][0]
+                shot_reward, shot_info = self._process_shot(direction)
+                reward += shot_reward
+                
+                self.shot_trajectories.append(shot_info["trajectory"])
+                info["shots_fired"].append({"direction": direction, "type": "single"})
+                
+                if shot_info["hit"]:
+                    info["hit"] = shot_info["hit"]
+                if shot_info["explosion"] is not None:
+                    info["explosion"] = shot_info["explosion"]  # For backward compatibility
+                    info["explosions"].append(shot_info["explosion"])
+            else:
+                reward -= 0.02
+                info["cooldown_violation"] = True
+                
+        elif action_info["type"] == "dual":
+            if self.can_fire("dual"):
+                self.last_dual_shot_step = self.steps
+                self.last_shot_step = self.steps  # Also update single shot cooldown
+                
+                total_hits = []
+                for direction in action_info["directions"]:
+                    shot_reward, shot_info = self._process_shot(direction)
+                    reward += shot_reward
+                    
+                    self.shot_trajectories.append(shot_info["trajectory"])
+                    info["shots_fired"].append({"direction": direction, "type": "dual"})
+                    
+                    if shot_info["hit"]:
+                        total_hits.append(shot_info["hit"])
+                    if shot_info["explosion"] is not None:
+                        info["explosions"].append(shot_info["explosion"])
+                        # Set the first explosion as the main explosion for backward compatibility
+                        if info["explosion"] is None:
+                            info["explosion"] = shot_info["explosion"]
+                
+                # Bonus for dual shot efficiency
+                if len(total_hits) >= 2:
+                    reward += 0.5  # Bonus for hitting multiple targets
+                
+                info["hit"] = total_hits if total_hits else None
+            else:
+                reward -= 0.05  # Higher penalty for dual shot cooldown violation
+                info["dual_cooldown_violation"] = True
 
         # Store entity states before movement for tracking
         self.previous_entities = [e.copy() for e in self.entities]
         
         self._move()
 
-        # turret hit handling - FIXED
+        # Turret hit handling
         enemy_hits = [
             e for e in self.entities
             if e["type"] == "enemy" and
@@ -371,7 +485,7 @@ class TurretEnv(gym.Env):
 
         if enemy_hits:
             self.turret_hits += len(enemy_hits)
-            info["turret_hit"] = len(enemy_hits)  # For visual effects
+            info["turret_hit"] = len(enemy_hits)
             
             # Remove enemies that hit the turret
             self.entities = [
@@ -404,12 +518,15 @@ class TurretEnv(gym.Env):
         # Enhanced info for visual effects
         info["enemies_remaining"] = len([e for e in self.entities if e["type"] == "enemy"])
         info["allies_remaining"] = len([e for e in self.entities if e["type"] == "ally"])
-        info["can_fire"] = self.can_fire()
+        info["can_fire_single"] = self.can_fire("single")
+        info["can_fire_dual"] = self.can_fire("dual")
         info["sensor_range"] = self.sensor_range
         info["nearest_enemy"] = self.get_nearest_enemy()
         info["enemies_in_danger_zone"] = self.get_enemies_in_range(5.0)
+        info["shot_trajectories"] = self.shot_trajectories
+        info["action_description"] = self.get_action_description(action)
 
-        # final end check only if not done already
+        # Final end check only if not done already
         if not done:
             if not any(e["type"] == "enemy" for e in self.entities):
                 reward += 5.0
